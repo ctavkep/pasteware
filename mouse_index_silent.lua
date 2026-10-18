@@ -1,5 +1,5 @@
 -- 03_mouse_index_silent.lua
--- Method: __index hook on PlayerMouse (Hit, Target, UnitRay, X, Y) + Auto Weapon Ballistics + Deep TeamCheck + Liquid Glass UI
+-- Method: __index hook on PlayerMouse (Hit, Target, UnitRay, X, Y) + Smart Ballistic Prediction + Deep ESP TeamCheck + Liquid Glass UI
 
 local cloneref = cloneref or function(o) return o end
 local Players = cloneref(game:GetService("Players"))
@@ -9,7 +9,7 @@ local CoreGui = cloneref(game:GetService("CoreGui"))
 local ScriptContext = cloneref(game:GetService("ScriptContext"))
 local LogService = cloneref(game:GetService("LogService"))
 local GuiService = cloneref(game:GetService("GuiService"))
-local Teams = cloneref(game:GetService("Teams"))
+local Stats = cloneref(game:GetService("Stats"))
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
@@ -20,17 +20,15 @@ local Config = {
     FOV = 180,
     ShowFOV = true,
     HitChance = 100,
-    TeamCheck = false,
+    PredictionEnabled = true,
+    PredictionScale = 1.00, -- Slider: 0.10 to 10.00
+    AutoBallistics = true,
+    TeamCheck = true,
     ESPTeamCheck = true,
     IgnoreForceField = true,
     WallCheck = true,
     Multipoint = true,
     MultipointScale = 0.72,
-    PredictionEnabled = true,
-    PredictionMultiplier = 1.0,
-    AutoBallistics = true,
-    DefaultBulletSpeed = 1200,
-    DefaultBulletGravity = 196.2,
     TargetParts = {
         Head = true,
         Torso = false,
@@ -47,6 +45,7 @@ local Config = {
     RequireFullExposure = true,
     ChamsEnabled = true,
     ChamsFill = Color3.fromRGB(0, 170, 255),
+    EnemyChamsFill = Color3.fromRGB(255, 35, 35),
     ChamsOutline = Color3.fromRGB(255, 255, 255)
 }
 
@@ -70,7 +69,7 @@ local function BypassAntiCheats()
         for _, sig in ipairs({ ScriptContext.Error, LogService.MessageOut, GuiService.MenuOpened }) do
             pcall(function()
                 for _, conn in ipairs(getconnections(sig)) do
-                    conn:Disable()
+                    if conn.Disable then conn:Disable() end
                 end
             end)
         end
@@ -81,16 +80,16 @@ local function BypassAntiCheats()
                 if type(v) == "table" then
                     local det = rawget(v, "Detected")
                     local kill = rawget(v, "Kill")
-                    if type(det) == "function" and islclosure(det) and not isexecutorclosure(det) then
+                    if type(det) == "function" and islclosure(det) and (not isexecutorclosure or not isexecutorclosure(det)) then
                         hookfunction(det, newcclosure(function() return true end))
                     end
-                    if type(kill) == "function" and islclosure(kill) and not isexecutorclosure(kill) then
+                    if type(kill) == "function" and islclosure(kill) and (not isexecutorclosure or not isexecutorclosure(kill)) then
                         hookfunction(kill, newcclosure(function() return nil end))
                     end
                     local anti = rawget(v, "Anti")
                     if type(anti) == "table" and rawget(v, "Variables") and rawget(v, "Process") then
                         for _, func in pairs(anti) do
-                            if type(func) == "function" and islclosure(func) and not isexecutorclosure(func) then
+                            if type(func) == "function" and islclosure(func) and (not isexecutorclosure or not isexecutorclosure(func)) then
                                 hookfunction(func, newcclosure(function() return true end))
                             end
                         end
@@ -102,35 +101,52 @@ local function BypassAntiCheats()
 end
 pcall(BypassAntiCheats)
 
--- Deep Team & Enemy Identification Engine
-local TeamAttributes = { "Team", "TeamName", "Faction", "Side", "Squad", "Clan", "Group", "TeamId", "TeamColor" }
+-- Deep Team / Faction Resolver
+local TeamKeys = { "Team", "TeamName", "Faction", "Side", "Squad", "TeamId", "Group", "Allegiance" }
 
-local function ExtractCustomTeam(plr)
+local function ExtractFactionId(plr)
     if not plr then return nil end
-    for i = 1, #TeamAttributes do
-        local val = plr:GetAttribute(TeamAttributes[i])
-        if val ~= nil and val ~= "" and val ~= "None" and val ~= "Neutral" then return tostring(val) end
+    if plr.Team ~= nil and not plr.Neutral then
+        return "T_" .. tostring(plr.Team.Name)
+    end
+    if plr.TeamColor ~= nil and not plr.Neutral then
+        return "TC_" .. tostring(plr.TeamColor.Name)
+    end
+    for i = 1, #TeamKeys do
+        local k = TeamKeys[i]
+        local attr = plr:GetAttribute(k)
+        if attr ~= nil and attr ~= "" and attr ~= "None" then
+            return "A_" .. tostring(attr)
+        end
+        local char = plr.Character
+        if char then
+            local cAttr = char:GetAttribute(k)
+            if cAttr ~= nil and cAttr ~= "" and cAttr ~= "None" then
+                return "CA_" .. tostring(cAttr)
+            end
+        end
+    end
+    for _, folderName in ipairs({ "leaderstats", "Data", "Stats", "Status", "PlayerData" }) do
+        local f = plr:FindFirstChild(folderName)
+        if f then
+            for i = 1, #TeamKeys do
+                local valObj = f:FindFirstChild(TeamKeys[i])
+                if valObj and valObj:IsA("ValueBase") and valObj.Value ~= nil and tostring(valObj.Value) ~= "" then
+                    return "V_" .. tostring(valObj.Value)
+                end
+            end
+        end
     end
     local char = plr.Character
     if char then
-        for i = 1, #TeamAttributes do
-            local val = char:GetAttribute(TeamAttributes[i])
-            if val ~= nil and val ~= "" and val ~= "None" and val ~= "Neutral" then return tostring(val) end
+        for i = 1, #TeamKeys do
+            local valObj = char:FindFirstChild(TeamKeys[i])
+            if valObj and valObj:IsA("ValueBase") and valObj.Value ~= nil then
+                return "CV_" .. tostring(valObj.Value)
+            end
         end
         if char.Parent and char.Parent ~= workspace and char.Parent.Name ~= "Characters" and char.Parent.Name ~= "Players" then
-            return "Folder_" .. char.Parent.Name
-        end
-    end
-    local ls = plr:FindFirstChild("leaderstats")
-    local st = plr:FindFirstChild("Stats") or plr:FindFirstChild("Data")
-    for _, folder in ipairs({ ls, st, plr, char }) do
-        if folder then
-            for i = 1, #TeamAttributes do
-                local obj = folder:FindFirstChild(TeamAttributes[i])
-                if obj and obj:IsA("ValueBase") and obj.Value ~= nil and tostring(obj.Value) ~= "" then
-                    return tostring(obj.Value)
-                end
-            end
+            return "P_" .. char.Parent.Name
         end
     end
     return nil
@@ -138,177 +154,241 @@ end
 
 local function IsEnemy(plr)
     if not plr or plr == LocalPlayer then return false end
-    if #Teams:GetTeams() > 0 then
-        if not (plr.Neutral and LocalPlayer.Neutral) and plr.Team ~= nil and LocalPlayer.Team ~= nil then
-            return plr.Team ~= LocalPlayer.Team
-        end
+    local myFaction = ExtractFactionId(LocalPlayer)
+    local theirFaction = ExtractFactionId(plr)
+    if myFaction and theirFaction then
+        return myFaction ~= theirFaction
     end
-    if plr.TeamColor and LocalPlayer.TeamColor and not plr.Neutral and not LocalPlayer.Neutral then
-        return plr.TeamColor ~= LocalPlayer.TeamColor
-    end
-    local myCustom = ExtractCustomTeam(LocalPlayer)
-    local theirCustom = ExtractCustomTeam(plr)
-    if myCustom and theirCustom then return myCustom ~= theirCustom end
     return true
 end
 
--- Auto Weapon Ballistics Inspector
-local SpeedKeys = { "BulletSpeed", "MuzzleVelocity", "Velocity", "Speed", "ProjectileSpeed", "travelSpeed", "bulletSpeed", "muzzleVelocity", "FireSpeed", "v0" }
-local GravityKeys = { "BulletDrop", "Gravity", "Drop", "BulletGravity", "ProjectileGravity", "gravity", "bulletDrop", "Acceleration" }
-local LiveWeaponData = { Speed = 0, Gravity = 0, IsBallistic = false, WeaponName = "Hitscan" }
+-- Deep Weapon & Custom Inventory Ballistics Scanner
+local CachedBallistics = {
+    LastScan = 0,
+    ToolRef = nil,
+    HasBallistics = false,
+    BulletSpeed = 2500,
+    BulletDrop = 0
+}
 
-local function ScanTableForBallistics(tbl, depth)
-    if depth > 3 or type(tbl) ~= "table" then return nil, nil end
-    local foundSpeed, foundGrav = nil, nil
+local SpeedKeys = {
+    "BSpeed", "BulletSpeed", "MuzzleVelocity", "ProjectileSpeed",
+    "BulletVelocity", "Velocity", "Speed", "FireVelocity", "InitialVelocity"
+}
+local DropKeys = {
+    "BDrop", "BulletDrop", "Gravity", "ProjectileGravity",
+    "BulletGravity", "Drop", "GravityFactor", "BulletAcceleration"
+}
+
+local function ScanTableForBallistics(tbl, visited, depth)
+    if depth > 3 or type(tbl) ~= "table" or visited[tbl] then return nil, nil end
+    visited[tbl] = true
+    local foundSpeed, foundDrop = nil, nil
+
     for i = 1, #SpeedKeys do
         local v = rawget(tbl, SpeedKeys[i])
-        if type(v) == "number" and v > 25 and v < 30000 then foundSpeed = v; break end
-    end
-    for i = 1, #GravityKeys do
-        local v = rawget(tbl, GravityKeys[i])
-        if type(v) == "number" and v >= 0 and v < 5000 then foundGrav = v; break
-        elseif typeof(v) == "Vector3" and v.Y < 0 then foundGrav = math.abs(v.Y); break end
-    end
-    if not foundSpeed then
-        for k, v in pairs(tbl) do
-            if type(v) == "table" and (k == "Setting" or k == "Settings" or k == "Config" or k == "Ballistics" or k == "Stats") then
-                local s, g = ScanTableForBallistics(v, depth + 1)
-                if s then foundSpeed = s; foundGrav = g; break end
-            end
+        if type(v) == "number" and v > 25 and v < 25000 then
+            foundSpeed = v
+            break
         end
     end
-    return foundSpeed, foundGrav
+    for i = 1, #DropKeys do
+        local v = rawget(tbl, DropKeys[i])
+        if type(v) == "number" and v >= 0 and v < 2000 then
+            foundDrop = v
+            break
+        elseif typeof(v) == "Vector3" and v.Y ~= 0 then
+            foundDrop = math.abs(v.Y)
+            break
+        end
+    end
+    if foundSpeed then return foundSpeed, foundDrop end
+
+    for k, sub in pairs(tbl) do
+        if type(sub) == "table" and k ~= "_G" and k ~= "shared" then
+            local s, d = ScanTableForBallistics(sub, visited, depth + 1)
+            if s then return s, d or foundDrop end
+        end
+    end
+    return nil, nil
 end
 
-local function InspectInstanceBallistics(inst)
+local function ExtractFromInstance(inst)
     if not inst then return nil, nil end
-    local s, g = nil, nil
+    local s, d = nil, nil
     for i = 1, #SpeedKeys do
-        local attr = inst:GetAttribute(SpeedKeys[i])
-        if type(attr) == "number" and attr > 25 then s = attr; break end
-        local valObj = inst:FindFirstChild(SpeedKeys[i], true)
-        if valObj and valObj:IsA("NumberValue") and valObj.Value > 25 then s = valObj.Value; break end
+        local a = inst:GetAttribute(SpeedKeys[i])
+        if type(a) == "number" and a > 25 then s = a; break end
     end
-    for i = 1, #GravityKeys do
-        local attr = inst:GetAttribute(GravityKeys[i])
-        if type(attr) == "number" and attr >= 0 then g = attr; break end
-        local valObj = inst:FindFirstChild(GravityKeys[i], true)
-        if valObj and valObj:IsA("NumberValue") and valObj.Value >= 0 then g = valObj.Value; break end
+    for i = 1, #DropKeys do
+        local a = inst:GetAttribute(DropKeys[i])
+        if type(a) == "number" and a >= 0 then d = a; break end
     end
-    if not s then
-        for _, mod in ipairs(inst:GetDescendants()) do
-            if mod:IsA("ModuleScript") then
-                local ok, req = pcall(require, mod)
-                if ok and type(req) == "table" then
-                    local ms, mg = ScanTableForBallistics(req, 1)
-                    if ms then s = ms; g = mg; break end
-                end
-            end
-        end
-    end
-    return s, g
-end
+    if s then return s, d end
 
-local function UpdateWeaponBallistics()
-    if not Config.AutoBallistics then return end
-    local char = LocalPlayer.Character
-    local cam = workspace.CurrentCamera
-    local s, g, wName = nil, nil, nil
-    if char then
-        local tool = char:FindFirstChildOfClass("Tool") or char:FindFirstChildOfClass("Model")
-        if tool then
-            s, g = InspectInstanceBallistics(tool)
-            if s then wName = tool.Name end
-        end
-    end
-    if not s and cam then
-        for _, child in ipairs(cam:GetChildren()) do
-            if child:IsA("Model") or child:IsA("Folder") then
-                local ms, mg = InspectInstanceBallistics(child)
-                if ms then s, g, wName = ms, mg, child.Name; break end
+    for _, desc in ipairs(inst:GetDescendants()) do
+        if desc:IsA("NumberValue") or desc:IsA("IntValue") then
+            local name = desc.Name
+            for i = 1, #SpeedKeys do
+                if name == SpeedKeys[i] and desc.Value > 25 then s = desc.Value; break end
+            end
+            for i = 1, #DropKeys do
+                if name == DropKeys[i] and desc.Value >= 0 then d = desc.Value; break end
             end
         end
     end
-    if not s and getgc then
+    if s then return s, d end
+
+    if getgc then
+        local toolName = inst.Name
         pcall(function()
             for _, v in ipairs(getgc(true)) do
-                if type(v) == "table" and (rawget(v, "Equipped") == true or rawget(v, "CurrentWeapon")) then
-                    local sub = rawget(v, "CurrentWeapon") or v
-                    local ms, mg = ScanTableForBallistics(sub, 1)
-                    if ms then s, g, wName = ms, mg, "CustomGC"; break end
+                if type(v) == "table" then
+                    if rawget(v, "gunName") == toolName or rawget(v, "Name") == toolName or rawget(v, "ToolName") == toolName or rawget(v, "BSpeed") or rawget(v, "MuzzleVelocity") then
+                        local gs, gd = ScanTableForBallistics(v, {}, 1)
+                        if gs then
+                            s, d = gs, gd
+                            break
+                        end
+                    end
                 end
             end
         end)
     end
-    if s and s > 25 then
-        LiveWeaponData.Speed = s
-        LiveWeaponData.Gravity = g or workspace.Gravity
-        LiveWeaponData.IsBallistic = true
-        LiveWeaponData.WeaponName = wName or "Detected"
-    else
-        LiveWeaponData.Speed = 0
-        LiveWeaponData.Gravity = 0
-        LiveWeaponData.IsBallistic = false
-        LiveWeaponData.WeaponName = "Hitscan"
-    end
+    return s, d
 end
 
-task.spawn(function()
-    while task.wait(1.2) do pcall(UpdateWeaponBallistics) end
-end)
+local function GetEquippedWeaponObject()
+    local char = LocalPlayer.Character
+    if char then
+        local tool = char:FindFirstChildOfClass("Tool")
+        if tool then return tool end
+        for _, child in ipairs(char:GetChildren()) do
+            if child:IsA("Model") and (child:FindFirstChild("Handle") or child:FindFirstChild("Muzzle") or child:FindFirstChild("ACS_Modulo") or child:FindFirstChild("FirePoint")) then
+                return child
+            end
+        end
+    end
+    if Camera then
+        for _, child in ipairs(Camera:GetChildren()) do
+            if child:IsA("Model") and (child.Name:lower():find("view") or child.Name:lower():find("arms") or child:FindFirstChild("Handle", true)) then
+                return child
+            end
+        end
+    end
+    local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, item in ipairs(bp:GetChildren()) do
+            if item:GetAttribute("Equipped") == true or item:GetAttribute("Active") == true then
+                return item
+            end
+        end
+    end
+    return nil
+end
 
-local VelocityHistory = setmetatable({}, { __mode = "k" })
-
-local function GetSmoothedVelocity(part, char)
-    if not part then return Vector3.zero, Vector3.zero end
-    local root = (char and char:FindFirstChild("HumanoidRootPart")) or part
+local function GetWeaponBallistics()
+    if not Config.AutoBallistics then
+        return false, 2500, 0
+    end
     local now = os.clock()
-    local data = VelocityHistory[char or part]
-    local rawVel = root.AssemblyLinearVelocity or root.Velocity or Vector3.zero
+    local weapon = GetEquippedWeaponObject()
+    if weapon == CachedBallistics.ToolRef and (now - CachedBallistics.LastScan) < 0.35 then
+        return CachedBallistics.HasBallistics, CachedBallistics.BulletSpeed, CachedBallistics.BulletDrop
+    end
+    CachedBallistics.LastScan = now
+    CachedBallistics.ToolRef = weapon
 
-    if not data then
-        VelocityHistory[char or part] = { LastPos = root.Position, LastTime = now, SmoothedVel = rawVel, SmoothedAcc = Vector3.zero }
-        return rawVel, Vector3.zero
+    if weapon then
+        local s, d = ExtractFromInstance(weapon)
+        if s and s > 25 and s < 6000 then
+            local drop = d or 0
+            if drop > 0 and drop <= 5 then
+                drop = workspace.Gravity * drop
+            elseif drop == 0 and s < 3500 then
+                drop = workspace.Gravity * 0.25
+            end
+            CachedBallistics.HasBallistics = true
+            CachedBallistics.BulletSpeed = s
+            CachedBallistics.BulletDrop = drop
+            return true, s, drop
+        end
     end
 
-    local dt = now - data.LastTime
-    if dt > 0.003 and dt < 0.5 then
-        local deltaVel = (root.Position - data.LastPos) / dt
-        local newVel = data.SmoothedVel:Lerp(rawVel:Lerp(deltaVel, 0.45), 0.38)
-        local acc = (newVel - data.SmoothedVel) / dt
-        data.SmoothedAcc = data.SmoothedAcc:Lerp(Vector3.new(acc.X, 0, acc.Z), 0.25)
-        data.SmoothedVel = newVel
-        data.LastPos = root.Position
-        data.LastTime = now
-    elseif dt >= 0.5 then
-        data.LastPos = root.Position
-        data.LastTime = now
-        data.SmoothedVel = rawVel
-        data.SmoothedAcc = Vector3.zero
-    end
-    return data.SmoothedVel, data.SmoothedAcc
+    CachedBallistics.HasBallistics = false
+    CachedBallistics.BulletSpeed = 99999
+    CachedBallistics.BulletDrop = 0
+    return false, 99999, 0
 end
 
-local function ComputePredictedPosition(origin, baseTargetPos, targetPart)
-    if not Config.PredictionEnabled or not targetPart then return baseTargetPos end
-    local vel, acc = GetSmoothedVelocity(targetPart, targetPart.Parent)
-    if vel.Magnitude < 0.2 then return baseTargetPos end
+-- Real-Time Velocity Resolver (handles CFrame-moved characters and physics velocity)
+local VelocityTracker = setmetatable({}, { __mode = "k" })
 
-    local mult = Config.PredictionMultiplier
-    local dist = (baseTargetPos - origin).Magnitude
-    local speed = LiveWeaponData.Speed
-    local grav = LiveWeaponData.Gravity
+local function UpdateVelocityTracking(dt)
+    if dt <= 0 or dt > 0.5 then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart") or plr.Character.PrimaryPart
+            if hrp then
+                local pos = hrp.Position
+                local physVel = hrp.AssemblyLinearVelocity or hrp.Velocity or Vector3.zero
+                local data = VelocityTracker[plr]
+                if not data then
+                    VelocityTracker[plr] = { LastPos = pos, SmoothedVel = physVel }
+                else
+                    local deltaVel = (pos - data.LastPos) / dt
+                    local rawVel = (deltaVel.Magnitude > physVel.Magnitude * 0.5) and deltaVel or physVel
+                    if rawVel.Magnitude > 250 then rawVel = physVel end
+                    data.SmoothedVel = data.SmoothedVel:Lerp(rawVel, math.clamp(dt * 14, 0.15, 0.85))
+                    data.LastPos = pos
+                end
+            end
+        end
+    end
+end
 
-    if Config.AutoBallistics and LiveWeaponData.IsBallistic and speed > 25 then
-        local t = dist / speed
-        local projPos = baseTargetPos + (vel * t) + (0.5 * acc * (t * t) * 0.25)
-        t = (projPos - origin).Magnitude / speed
-        local scaledT = t * mult
-        local leadOffset = (vel * scaledT) + (0.5 * acc * (scaledT * scaledT) * 0.2)
-        local dropHeight = 0.5 * grav * (t * t) * mult
-        return baseTargetPos + leadOffset + Vector3.new(0, dropHeight, 0)
+local function GetPingSeconds()
+    local ok, p = pcall(function()
+        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    if ok and type(p) == "number" then
+        return math.clamp(p / 1000, 0.01, 0.4)
+    end
+    return 0.065
+end
+
+local function GetPredictedPosition(part, basePos)
+    if not Config.PredictionEnabled or not part or not basePos then
+        return basePos
+    end
+    local char = part.Parent
+    local plr = char and Players:GetPlayerFromCharacter(char)
+    local vel = Vector3.zero
+    if plr and VelocityTracker[plr] then
+        vel = VelocityTracker[plr].SmoothedVel
     else
-        return baseTargetPos + (vel * (0.042 * mult))
+        vel = part.AssemblyLinearVelocity or part.Velocity or Vector3.zero
+    end
+    if vel.Magnitude < 0.5 then
+        return basePos
+    end
+
+    local origin = (Camera and Camera.CFrame.Position) or basePos
+    local dist = (basePos - origin).Magnitude
+    local scale = Config.PredictionScale
+    local hasBallistics, bulletSpeed, bulletDrop = GetWeaponBallistics()
+
+    if hasBallistics and bulletSpeed > 30 and bulletSpeed < 6000 then
+        local tof = dist / bulletSpeed
+        local nextPos = basePos + (vel * tof * scale)
+        tof = (nextPos - origin).Magnitude / bulletSpeed
+        local leadOffset = vel * (tof + GetPingSeconds() * 0.35) * scale
+        local dropOffset = Vector3.new(0, 0.5 * bulletDrop * (tof * tof) * math.clamp(scale, 0.1, 3.0), 0)
+        return basePos + leadOffset + dropOffset
+    else
+        local baseFactor = (GetPingSeconds() * 0.85 + 0.045) * (scale * 0.35)
+        local horizVel = Vector3.new(vel.X, vel.Y * 0.35, vel.Z)
+        return basePos + (horizVel * baseFactor)
     end
 end
 
@@ -354,7 +434,9 @@ local function IsPartFullyExposed(part, char)
     for i = 1, 4 do
         local worldPt = cf:PointToWorldSpace(cornerOffsets[i])
         local _, onScreen = Camera:WorldToViewportPoint(worldPt)
-        if not onScreen or not CastClear(origin, worldPt, char) then return false end
+        if not onScreen or not CastClear(origin, worldPt, char) then
+            return false
+        end
     end
     return true
 end
@@ -395,7 +477,9 @@ end
 local function GetCandidateParts(char)
     local list = {}
     if not char then return list end
-    if Config.IgnoreForceField and char:FindFirstChildOfClass("ForceField") then return list end
+    if Config.IgnoreForceField and char:FindFirstChildOfClass("ForceField") then
+        return list
+    end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return list end
 
@@ -415,6 +499,7 @@ end
 
 local CurrentTarget = nil
 local CurrentTargetPos = nil
+local CurrentPredictedPos = nil
 local CurrentTargetFullyExposed = false
 
 local function GetClosestTarget()
@@ -427,52 +512,51 @@ local function GetClosestTarget()
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and (not Config.TeamCheck or IsEnemy(plr)) then
             local char = plr.Character
-            if char then
-                GetSmoothedVelocity(char:FindFirstChild("HumanoidRootPart"), char)
-                local parts = GetCandidateParts(char)
-                for i = 1, #parts do
-                    local part = parts[i]
-                    local pt, dist = ResolveMultipointOnPart(part, char, mousePos, bestDist)
-                    if pt and dist then
-                        bestDist = dist
-                        bestPart = part
-                        bestPos = pt
-                        if Config.RequireFullExposure then
-                            bestExposed = IsPartFullyExposed(part, char)
-                        else
-                            bestExposed = CastClear(Camera.CFrame.Position, pt, char)
-                        end
+            local parts = GetCandidateParts(char)
+            for i = 1, #parts do
+                local part = parts[i]
+                local pt, dist = ResolveMultipointOnPart(part, char, mousePos, bestDist)
+                if pt and dist then
+                    bestDist = dist
+                    bestPart = part
+                    bestPos = pt
+                    if Config.RequireFullExposure then
+                        bestExposed = IsPartFullyExposed(part, char)
+                    else
+                        bestExposed = CastClear(Camera.CFrame.Position, pt, char)
                     end
                 end
             end
         end
     end
-
-    if bestPart and bestPos then
-        bestPos = ComputePredictedPosition(Camera.CFrame.Position, bestPos, bestPart)
-    end
     return bestPart, bestPos, bestExposed
 end
 
+-- Deep Team-Aware Chams ESP
 local ChamsFolder = ProtectInstance(Instance.new("Folder"))
 ChamsFolder.Name = RandomStr(10)
 ChamsFolder.Parent = SafeContainer
-local PlayerHighlights = {}
 
 local function RefreshAllChams()
-    for plr, hl in pairs(PlayerHighlights) do
-        if plr and plr.Parent and hl and hl.Parent then
-            local enemy = IsEnemy(plr)
-            if not Config.ChamsEnabled then
-                hl.Enabled = false
-            elseif Config.ESPTeamCheck then
-                hl.Enabled = enemy
-                hl.FillColor = Color3.fromRGB(255, 40, 40)
-                hl.OutlineColor = Color3.fromRGB(255, 255, 255)
-            else
-                hl.Enabled = true
-                hl.FillColor = enemy and Color3.fromRGB(255, 40, 40) or Config.ChamsFill
-                hl.OutlineColor = Config.ChamsOutline
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local hl = ChamsFolder:FindFirstChild(plr.Name)
+            local char = plr.Character
+            if hl and hl:IsA("Highlight") then
+                if not char or not Config.ChamsEnabled then
+                    hl.Enabled = false
+                else
+                    local enemy = IsEnemy(plr)
+                    if Config.ESPTeamCheck then
+                        hl.Enabled = enemy
+                        hl.FillColor = Config.EnemyChamsFill
+                        hl.OutlineColor = Color3.fromRGB(255, 160, 160)
+                    else
+                        hl.Enabled = true
+                        hl.FillColor = enemy and Config.EnemyChamsFill or Config.ChamsFill
+                        hl.OutlineColor = Config.ChamsOutline
+                    end
+                end
             end
         end
     end
@@ -482,18 +566,16 @@ local function ApplyChams(plr)
     if plr == LocalPlayer then return end
     local function OnChar(char)
         task.wait(0.1)
+        if not char then return end
         local old = ChamsFolder:FindFirstChild(plr.Name)
         if old then old:Destroy() end
         local hl = ProtectInstance(Instance.new("Highlight"))
         hl.Name = plr.Name
         hl.Adornee = char
-        hl.FillColor = Color3.fromRGB(255, 40, 40)
-        hl.OutlineColor = Config.ChamsOutline
-        hl.FillTransparency = 0.45
-        hl.OutlineTransparency = 0.1
+        hl.FillTransparency = 0.42
+        hl.OutlineTransparency = 0.08
         hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         hl.Parent = ChamsFolder
-        PlayerHighlights[plr] = hl
         RefreshAllChams()
     end
     if plr.Character then task.spawn(OnChar, plr.Character) end
@@ -505,12 +587,10 @@ end
 for _, p in ipairs(Players:GetPlayers()) do ApplyChams(p) end
 Players.PlayerAdded:Connect(ApplyChams)
 Players.PlayerRemoving:Connect(function(p)
-    PlayerHighlights[p] = nil
     local c = ChamsFolder:FindFirstChild(p.Name)
     if c then c:Destroy() end
 end)
 LocalPlayer:GetPropertyChangedSignal("Team"):Connect(RefreshAllChams)
-LocalPlayer:GetPropertyChangedSignal("TeamColor"):Connect(RefreshAllChams)
 
 local FOVCircle = Drawing.new("Circle")
 FOVCircle.Radius = Config.FOV
@@ -529,8 +609,8 @@ ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
 ScreenGui.Parent = SafeContainer
 
 local MainFrame = ProtectInstance(Instance.new("Frame", ScreenGui))
-MainFrame.Size = UDim2.new(0, 395, 0, 540)
-MainFrame.Position = UDim2.new(0.5, -197, 0.5, -270)
+MainFrame.Size = UDim2.new(0, 390, 0, 540)
+MainFrame.Position = UDim2.new(0.5, -195, 0.5, -270)
 MainFrame.BackgroundColor3 = Color3.fromRGB(16, 20, 30)
 MainFrame.BackgroundTransparency = 0.22
 MainFrame.BorderSizePixel = 0
@@ -550,14 +630,14 @@ GlassGrad.Color = ColorSequence.new({
     ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 140, 190))
 })
 
-local TopBanner = ProtectInstance(Instance.new("Frame", MainFrame))
-TopBanner.Size = UDim2.new(1, 0, 0, 44)
-TopBanner.BackgroundTransparency = 1
-TopBanner.Active = true
+local DragBar = ProtectInstance(Instance.new("Frame", MainFrame))
+DragBar.Size = UDim2.new(1, 0, 0, 44)
+DragBar.BackgroundTransparency = 1
+DragBar.Active = true
 
-local Header = ProtectInstance(Instance.new("TextLabel", TopBanner))
+local Header = ProtectInstance(Instance.new("TextLabel", DragBar))
 Header.Size = UDim2.new(1, -24, 0, 24)
-Header.Position = UDim2.new(0, 12, 0, 6)
+Header.Position = UDim2.new(0, 12, 0, 4)
 Header.BackgroundTransparency = 1
 Header.Text = "LIQUID GLASS // 03 MOUSE INDEX SILENT"
 Header.TextColor3 = Color3.fromRGB(240, 248, 255)
@@ -565,9 +645,9 @@ Header.Font = Enum.Font.GothamBold
 Header.TextSize = 14
 Header.TextXAlignment = Enum.TextXAlignment.Left
 
-local SubHeader = ProtectInstance(Instance.new("TextLabel", TopBanner))
+local SubHeader = ProtectInstance(Instance.new("TextLabel", DragBar))
 SubHeader.Size = UDim2.new(1, -24, 0, 16)
-SubHeader.Position = UDim2.new(0, 12, 0, 26)
+SubHeader.Position = UDim2.new(0, 12, 0, 24)
 SubHeader.BackgroundTransparency = 1
 SubHeader.Text = "[DELETE] Menu | [F] Autofire: OFF"
 SubHeader.TextColor3 = Color3.fromRGB(255, 110, 110)
@@ -581,25 +661,23 @@ Scroll.Position = UDim2.new(0, 10, 0, 48)
 Scroll.BackgroundTransparency = 1
 Scroll.BorderSizePixel = 0
 Scroll.ScrollBarThickness = 3
-Scroll.CanvasSize = UDim2.new(0, 0, 0, 860)
 
 local ListLayout = ProtectInstance(Instance.new("UIListLayout", Scroll))
 ListLayout.Padding = UDim.new(0, 6)
 ListLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
-local AnySliderDragging = false
-
+local IsDraggingSlider = false
 do
     local dragging, dragStart, startPos
-    TopBanner.InputBegan:Connect(function(input)
-        if not AnySliderDragging and input.UserInputType == Enum.UserInputType.MouseButton1 then
+    DragBar.InputBegan:Connect(function(input)
+        if not IsDraggingSlider and input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = true
             dragStart = input.Position
             startPos = MainFrame.Position
         end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if dragging and not AnySliderDragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        if dragging and not IsDraggingSlider and input.UserInputType == Enum.UserInputType.MouseMovement then
             local delta = input.Position - dragStart
             MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
@@ -612,7 +690,7 @@ do
 end
 
 local function RefreshStatusText()
-    SubHeader.Text = string.format("[%s] Menu | [%s] Autofire: %s | Gun: %s", Config.MenuKey.Name, Config.AutoFireKey.Name, Config.AutoFire and "ON" or "OFF", LiveWeaponData.WeaponName)
+    SubHeader.Text = string.format("[%s] Menu | [%s] Autofire: %s", Config.MenuKey.Name, Config.AutoFireKey.Name, Config.AutoFire and "ON" or "OFF")
     SubHeader.TextColor3 = Config.AutoFire and Color3.fromRGB(0, 195, 255) or Color3.fromRGB(255, 110, 110)
 end
 
@@ -656,9 +734,13 @@ local function CreateToggle(name, default, callback)
     return SetState
 end
 
-local function CreateSlider(name, minVal, maxVal, default, suffix, decimals, callback)
+local function CreateSlider(name, minVal, maxVal, default, suffix, callback, decimals)
+    decimals = decimals or 0
+    local mult = 10 ^ decimals
+    local fmt = decimals > 0 and ("%s: %." .. tostring(decimals) .. "f%s") or "%s: %d%s"
+
     local box = ProtectInstance(Instance.new("Frame", Scroll))
-    box.Size = UDim2.new(1, -8, 0, 46)
+    box.Size = UDim2.new(1, -8, 0, 44)
     box.BackgroundColor3 = Color3.fromRGB(26, 34, 48)
     box.BackgroundTransparency = 0.35
     box.Active = true
@@ -666,8 +748,6 @@ local function CreateSlider(name, minVal, maxVal, default, suffix, decimals, cal
     local st = ProtectInstance(Instance.new("UIStroke", box))
     st.Color = Color3.fromRGB(255, 255, 255)
     st.Transparency = 0.82
-
-    local fmt = decimals and decimals > 0 and ("%s: %." .. tostring(decimals) .. "f%s") or "%s: %d%s"
 
     local lbl = ProtectInstance(Instance.new("TextLabel", box))
     lbl.Size = UDim2.new(1, -20, 0, 20)
@@ -695,50 +775,33 @@ local function CreateSlider(name, minVal, maxVal, default, suffix, decimals, cal
     hitBtn.BackgroundTransparency = 1
     hitBtn.Text = ""
     hitBtn.AutoButtonColor = false
-    hitBtn.ZIndex = 10
 
     local sliding = false
-    local function UpdateFromX(absX)
-        local rel = math.clamp((absX - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+    local function UpdateFromX(xPos)
+        local rel = math.clamp((xPos - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
         local raw = minVal + (maxVal - minVal) * rel
-        local val
-        if decimals and decimals > 0 then
-            local mult = 10 ^ decimals
-            val = math.floor(raw * mult + 0.5) / mult
-        else
-            val = math.floor(raw + 0.5)
-        end
+        local val = math.floor(raw * mult + 0.5) / mult
         fill.Size = UDim2.new(rel, 0, 1, 0)
         lbl.Text = string.format(fmt, name, val, suffix or "")
         callback(val)
     end
 
-    hitBtn.MouseButton1Down:Connect(function(x)
-        sliding = true
-        AnySliderDragging = true
-        Scroll.ScrollingEnabled = false
-        UpdateFromX(x)
-    end)
     hitBtn.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
             sliding = true
-            AnySliderDragging = true
-            Scroll.ScrollingEnabled = false
+            IsDraggingSlider = true
             UpdateFromX(input.Position.X)
         end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if sliding and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        if sliding and input.UserInputType == Enum.UserInputType.MouseMovement then
             UpdateFromX(input.Position.X)
         end
     end)
     UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            if sliding then
-                sliding = false
-                AnySliderDragging = false
-                Scroll.ScrollingEnabled = true
-            end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 and sliding then
+            sliding = false
+            IsDraggingSlider = false
         end
     end)
 end
@@ -763,24 +826,21 @@ local SetAutoFireUI = CreateToggle("Autofire (Full-Exposure + FOV)", Config.Auto
     RefreshStatusText()
 end)
 CreateToggle("Require 100% Full Part Exposure", Config.RequireFullExposure, function(v) Config.RequireFullExposure = v end)
-CreateSlider("Autofire Click Interval", 10, 10000, Config.FireInterval, " ms", 0, function(v) Config.FireInterval = v end)
+CreateSlider("Autofire Click Interval", 10, 10000, Config.FireInterval, " ms", function(v) Config.FireInterval = v end, 0)
 CreateToggle("Silent Aim Enabled", Config.SilentEnabled, function(v) Config.SilentEnabled = v end)
 CreateToggle("Smart Prediction Enabled", Config.PredictionEnabled, function(v) Config.PredictionEnabled = v end)
-CreateSlider("Prediction Scale (0.10 - 10)", 0.10, 10.00, Config.PredictionMultiplier, "x", 2, function(v) Config.PredictionMultiplier = v end)
-CreateToggle("Auto Weapon Ballistics Inspector", Config.AutoBallistics, function(v) Config.AutoBallistics = v; task.spawn(UpdateWeaponBallistics) end)
-CreateSlider("Aim FOV Radius", 20, 600, Config.FOV, " px", 0, function(v) Config.FOV = v; FOVCircle.Radius = v end)
-CreateSlider("HitChance", 1, 100, Config.HitChance, "%", 0, function(v) Config.HitChance = v end)
+CreateSlider("Prediction Scale (0.10 - 10)", 0.10, 10.00, Config.PredictionScale, "x", function(v) Config.PredictionScale = v end, 2)
+CreateToggle("Auto Weapon Ballistics Inspector", Config.AutoBallistics, function(v) Config.AutoBallistics = v; CachedBallistics.LastScan = 0 end)
+CreateSlider("Aim FOV Radius", 20, 600, Config.FOV, " px", function(v) Config.FOV = v; FOVCircle.Radius = v end, 0)
+CreateSlider("HitChance", 1, 100, Config.HitChance, "%", function(v) Config.HitChance = v end, 0)
 CreateToggle("Multipoint Scanning", Config.Multipoint, function(v) Config.Multipoint = v end)
-CreateSlider("Multipoint Scale", 20, 95, math.floor(Config.MultipointScale * 100), "%", 0, function(v) Config.MultipointScale = v / 100 end)
+CreateSlider("Multipoint Scale", 20, 95, math.floor(Config.MultipointScale * 100), "%", function(v) Config.MultipointScale = v / 100 end, 0)
 CreateToggle("WallCheck (Visible Only)", Config.WallCheck, function(v) Config.WallCheck = v end)
-CreateToggle("Aim TeamCheck (Enemies Only)", Config.TeamCheck, function(v) Config.TeamCheck = v end)
-CreateToggle("ESP TeamCheck (Red Enemies Only)", Config.ESPTeamCheck, function(v) Config.ESPTeamCheck = v; RefreshAllChams() end)
+CreateToggle("Aim TeamCheck (Deep)", Config.TeamCheck, function(v) Config.TeamCheck = v end)
+CreateToggle("ESP TeamCheck (Enemies Only = Red)", Config.ESPTeamCheck, function(v) Config.ESPTeamCheck = v; RefreshAllChams() end)
+CreateToggle("Chams ESP", Config.ChamsEnabled, function(v) Config.ChamsEnabled = v; RefreshAllChams() end)
 CreateToggle("Ignore ForceField", Config.IgnoreForceField, function(v) Config.IgnoreForceField = v end)
 CreateToggle("Show FOV Circle", Config.ShowFOV, function(v) Config.ShowFOV = v; FOVCircle.Visible = v end)
-CreateToggle("Chams ESP", Config.ChamsEnabled, function(v)
-    Config.ChamsEnabled = v
-    RefreshAllChams()
-end)
 
 for _, bone in ipairs({ "Head", "Torso", "HumanoidRootPart", "LeftArm", "RightArm", "LeftLeg", "RightLeg" }) do
     CreateToggle("Target Bone: " .. bone, Config.TargetParts[bone], function(v)
@@ -809,22 +869,37 @@ end)
 
 local LastShotClock = 0
 local IsClicking = false
+local LastChamsRefresh = 0
 
 local function TriggerMouseClick()
-    if mouse1press and mouse1release then
+    if mouse1click then
+        mouse1click()
+    elseif mouse1press and mouse1release then
         mouse1press()
         task.wait(0.01)
         mouse1release()
     end
 end
 
-RunService.RenderStepped:Connect(function()
+RunService.RenderStepped:Connect(function(dt)
+    UpdateVelocityTracking(dt)
     FOVCircle.Position = UserInputService:GetMouseLocation()
     CurrentTarget, CurrentTargetPos, CurrentTargetFullyExposed = GetClosestTarget()
+    if CurrentTarget and CurrentTargetPos then
+        CurrentPredictedPos = GetPredictedPosition(CurrentTarget, CurrentTargetPos)
+    else
+        CurrentPredictedPos = nil
+    end
+
+    local nowSec = os.clock()
+    if (nowSec - LastChamsRefresh) > 0.5 then
+        LastChamsRefresh = nowSec
+        RefreshAllChams()
+    end
 
     if Config.AutoFire and not IsClicking and not ScreenGui.Enabled then
-        if CurrentTarget and CurrentTargetPos and CurrentTargetFullyExposed then
-            local now = os.clock() * 1000
+        if CurrentTarget and CurrentPredictedPos and CurrentTargetFullyExposed then
+            local now = nowSec * 1000
             if (now - LastShotClock) >= Config.FireInterval then
                 if math.random(1, 100) <= Config.HitChance then
                     LastShotClock = now
@@ -841,20 +916,21 @@ end)
 
 local oldIndex
 oldIndex = hookmetamethod(game, "__index", newcclosure(function(self, key)
-    if not checkcaller() and self == Mouse and Config.SilentEnabled and CurrentTarget and CurrentTargetPos then
+    if not checkcaller() and self == Mouse and Config.SilentEnabled and CurrentTarget and CurrentPredictedPos then
         if math.random(1, 100) <= Config.HitChance then
+            local aimPt = CurrentPredictedPos
             if key == "Hit" then
-                return CFrame.new(CurrentTargetPos)
+                return CFrame.new(aimPt)
             elseif key == "Target" then
                 return CurrentTarget
             elseif key == "UnitRay" then
                 local origin = Camera.CFrame.Position
-                return Ray.new(origin, (CurrentTargetPos - origin).Unit)
+                return Ray.new(origin, (aimPt - origin).Unit)
             elseif key == "X" then
-                local pos = Camera:WorldToViewportPoint(CurrentTargetPos)
+                local pos = Camera:WorldToViewportPoint(aimPt)
                 return pos.X
             elseif key == "Y" then
-                local pos = Camera:WorldToViewportPoint(CurrentTargetPos)
+                local pos = Camera:WorldToViewportPoint(aimPt)
                 return pos.Y
             end
         end
